@@ -46,6 +46,7 @@ Fabricator(:post_with_images_in_quote_and_onebox, from: :post) do
   cooked '
 <aside class="quote"><img src="/uploads/default/1/1234567890123456.jpg"></aside>
 <div class="onebox-result"><img src="/uploads/default/1/1234567890123456.jpg"></div>
+<div class="onebox"><img src="/uploads/default/1/1234567890123456.jpg"></div>
 '
 end
 
@@ -73,6 +74,10 @@ end
 
 Fabricator(:post_with_large_image, from: :post) do
   cooked '<img src="/uploads/default/1/1234567890123456.jpg">'
+end
+
+Fabricator(:post_with_large_image_and_title, from: :post) do
+  cooked '<img src="/uploads/default/1/1234567890123456.jpg" title="WAT">'
 end
 
 Fabricator(:post_with_uploads, from: :post) do

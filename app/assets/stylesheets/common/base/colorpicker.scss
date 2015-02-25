@@ -18,11 +18,12 @@
     max-width: 300px;
 
     .colorpicker {
-      border: 1px solid $primary_border_color;
+      border: 1px solid scale-color-diff();
       margin-right: 2px;
       width: 16px;
       height: 16px;
-      font-size: 4px;
+      font-size: 0.286em
+;
       &.used-color {
         background: image-url("chosen-sprite.png") -19px 13px;
       }

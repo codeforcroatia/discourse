@@ -3,33 +3,38 @@ require_dependency 'pinned_check'
 class TopicViewSerializer < ApplicationSerializer
   include PostStreamSerializerMixin
 
-  # These attributes will be delegated to the topic
-  def self.topic_attributes
-    [:id,
-     :title,
-     :fancy_title,
-     :posts_count,
-     :created_at,
-     :views,
-     :reply_count,
-     :participant_count,
-     :like_count,
-     :last_posted_at,
-     :visible,
-     :closed,
-     :archived,
-     :has_summary,
-     :archetype,
-     :slug,
-     :category_id,
-     :word_count,
-     :deleted_at]
+  def self.attributes_from_topic(*list)
+    [list].flatten.each do |attribute|
+      attributes(attribute)
+      class_eval %{def #{attribute}
+        object.topic.#{attribute}
+      end}
+    end
   end
+
+  attributes_from_topic :id,
+                        :title,
+                        :fancy_title,
+                        :posts_count,
+                        :created_at,
+                        :views,
+                        :reply_count,
+                        :participant_count,
+                        :like_count,
+                        :last_posted_at,
+                        :visible,
+                        :closed,
+                        :archived,
+                        :has_summary,
+                        :archetype,
+                        :slug,
+                        :category_id,
+                        :word_count,
+                        :deleted_at
 
   attributes :draft,
              :draft_key,
              :draft_sequence,
-             :starred,
              :posted,
              :unpinned,
              :pinned_globally,
@@ -39,21 +44,19 @@ class TopicViewSerializer < ApplicationSerializer
              :highest_post_number,
              :last_read_post_number,
              :deleted_by,
+             :has_deleted,
              :actions_summary,
-             :expandable_first_post
-
-  # Define a delegator for each attribute of the topic we want
-  attributes(*topic_attributes)
-  topic_attributes.each do |ta|
-    class_eval %{def #{ta}
-      object.topic.#{ta}
-    end}
-  end
+             :expandable_first_post,
+             :is_warning,
+             :chunk_size,
+             :bookmarked
 
   # TODO: Split off into proper object / serializer
   def details
     result = {
       auto_close_at: object.topic.auto_close_at,
+      auto_close_hours: object.topic.auto_close_hours,
+      auto_close_based_on_last_post: object.topic.auto_close_based_on_last_post,
       created_by: BasicUserSerializer.new(object.topic.user, scope: scope, root: false),
       last_poster: BasicUserSerializer.new(object.topic.last_poster, scope: scope, root: false)
     }
@@ -92,6 +95,8 @@ class TopicViewSerializer < ApplicationSerializer
     if has_topic_user?
       result[:notification_level] = object.topic_user.notification_level
       result[:notifications_reason_id] = object.topic_user.notifications_reason_id
+    else
+      result[:notification_level] = TopicUser.notification_levels[:regular]
     end
 
     result[:can_move_posts] = true if scope.can_move_posts?(object.topic)
@@ -106,6 +111,17 @@ class TopicViewSerializer < ApplicationSerializer
     result
   end
 
+  def chunk_size
+    object.chunk_size
+  end
+
+  def is_warning
+    object.topic.private_message? && object.topic.subtype == TopicSubtype.moderator_warning
+  end
+
+  def include_is_warning?
+    is_warning
+  end
   def draft
     object.draft
   end
@@ -126,11 +142,6 @@ class TopicViewSerializer < ApplicationSerializer
   def has_topic_user?
     object.topic_user.present?
   end
-
-  def starred
-    object.topic_user.starred?
-  end
-  alias_method :include_starred?, :has_topic_user?
 
   def highest_post_number
     object.highest_post_number
@@ -170,9 +181,17 @@ class TopicViewSerializer < ApplicationSerializer
                   count: 0,
                   hidden: false,
                   can_act: scope.post_can_act?(post, sym)}
-      # TODO: other keys? :can_clear_flags, :acted, :can_undo
+      # TODO: other keys? :can_defer_flags, :acted, :can_undo
     end
     result
+  end
+
+  def has_deleted
+    object.has_deleted?
+  end
+
+  def include_has_deleted?
+    object.guardian.can_see_deleted_posts?
   end
 
   def expandable_first_post
@@ -181,6 +200,10 @@ class TopicViewSerializer < ApplicationSerializer
 
   def include_expandable_first_post?
     object.topic.expandable_first_post?
+  end
+
+  def bookmarked
+    object.topic_user.try(:bookmarked)
   end
 
 end

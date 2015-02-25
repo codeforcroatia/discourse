@@ -9,7 +9,13 @@ module Discourse
     extend Sidekiq::ExceptionHandler
   end
 
-  def self.handle_exception(ex, context=nil, parent_logger = nil)
+  # Log an exception.
+  #
+  # If your code is in a scheduled job, it is recommended to use the
+  # error_context() method in Jobs::Base to pass the job arguments and any
+  # other desired context.
+  # See app/jobs/base.rb for the error_context function.
+  def self.handle_job_exception(ex, context = {}, parent_logger = nil)
     context ||= {}
     parent_logger ||= SidekiqExceptionHandler
 
@@ -18,6 +24,29 @@ module Discourse
       current_db: cm.current_db,
       current_hostname: cm.current_hostname
     }.merge(context))
+  end
+
+  def self.handle_request_exception(ex, controller, request, current_user)
+    cm = RailsMultisite::ConnectionManagement
+    context = {
+      current_db: cm.current_db,
+      current_hostname: cm.current_hostname,
+      rails_action: controller.action_name,
+      rails_controller: controller.controller_name,
+    }
+
+    env = request.env.dup
+
+    context.each do |key, value|
+      Logster.add_to_env(env, key, value)
+    end
+
+    begin
+      Thread.current[Logster::Logger::LOGSTER_ENV] = env
+      Logster.logger.fatal("#{ex.class.to_s}: #{ex.message} in #{controller.controller_name}##{controller.action_name}")
+    ensure
+      Thread.current[Logster::Logger::LOGSTER_ENV] = nil
+    end
   end
 
   # Expected less matches than what we got in a find
@@ -50,11 +79,15 @@ module Discourse
   class CSRF < Exception; end
 
   def self.filters
-    @filters ||= [:latest, :unread, :new, :starred, :read, :posted]
+    @filters ||= [:latest, :unread, :new, :read, :posted, :bookmarks]
+  end
+
+  def self.feed_filters
+    @feed_filters ||= [:latest]
   end
 
   def self.anonymous_filters
-    @anonymous_filters ||= [:latest]
+    @anonymous_filters ||= [:latest, :top, :categories]
   end
 
   def self.logged_in_filters
@@ -74,8 +107,12 @@ module Discourse
     @plugins.each { |plugin| plugin.activate! }
   end
 
+  def self.disabled_plugin_names
+    plugins.select {|p| !p.enabled?}.map(&:name)
+  end
+
   def self.plugins
-    @plugins
+    @plugins ||= []
   end
 
   def self.assets_digest
@@ -104,12 +141,10 @@ module Discourse
 
   def self.auth_providers
     providers = []
-    if plugins
-      plugins.each do |p|
-        next unless p.auth_providers
-        p.auth_providers.each do |prov|
-          providers << prov
-        end
+    plugins.each do |p|
+      next unless p.auth_providers
+      p.auth_providers.each do |prov|
+        providers << prov
       end
     end
     providers
@@ -158,13 +193,24 @@ module Discourse
   end
 
   def self.enable_readonly_mode
-    $redis.set readonly_mode_key, 1
+    $redis.set(readonly_mode_key, 1)
     MessageBus.publish(readonly_channel, true)
+    keep_readonly_mode
     true
   end
 
+  def self.keep_readonly_mode
+    # extend the expiry by 1 minute every 30 seconds
+    Thread.new do
+      while readonly_mode?
+        $redis.expire(readonly_mode_key, 1.minute)
+        sleep 30.seconds
+      end
+    end
+  end
+
   def self.disable_readonly_mode
-    $redis.del readonly_mode_key
+    $redis.del(readonly_mode_key)
     MessageBus.publish(readonly_channel, false)
     true
   end
@@ -195,14 +241,26 @@ module Discourse
     end
   end
 
+  def self.git_branch
+    return $git_branch if $git_branch
+
+    begin
+      $git_branch ||= `git rev-parse --abbrev-ref HEAD`.strip
+    rescue
+      $git_branch = "unknown"
+    end
+  end
+
   # Either returns the site_contact_username user or the first admin.
   def self.site_contact_user
-    user = User.where(username_lower: SiteSetting.site_contact_username.downcase).first if SiteSetting.site_contact_username.present?
+    user = User.find_by(username_lower: SiteSetting.site_contact_username.downcase) if SiteSetting.site_contact_username.present?
     user ||= User.admins.real.order(:id).first
   end
 
+  SYSTEM_USER_ID = -1 unless defined? SYSTEM_USER_ID
+
   def self.system_user
-    User.where(id: -1).first
+    User.find_by(id: SYSTEM_USER_ID)
   end
 
   def self.store
@@ -245,8 +303,47 @@ module Discourse
     SiteSetting.after_fork
     $redis.client.reconnect
     Rails.cache.reconnect
-    # /!\ HACK /!\ force sidekiq to create a new connection to redis
-    Sidekiq.instance_variable_set(:@redis, nil)
+    Logster.store.redis.reconnect
+    # shuts down all connections in the pool
+    Sidekiq.redis_pool.shutdown{|c| nil}
+    # re-establish
+    Sidekiq.redis = sidekiq_redis_config
+    start_connection_reaper
+    nil
+  end
+
+  def self.start_connection_reaper
+    return if GlobalSetting.connection_reaper_age < 1 ||
+              GlobalSetting.connection_reaper_interval < 1
+
+    # this helps keep connection counts in check
+    Thread.new do
+      while true
+        begin
+          sleep GlobalSetting.connection_reaper_interval
+          reap_connections(GlobalSetting.connection_reaper_age)
+        rescue => e
+          Discourse.handle_exception(e, {message: "Error reaping connections"})
+        end
+      end
+    end
+  end
+
+  def self.reap_connections(age)
+    pools = []
+    ObjectSpace.each_object(ActiveRecord::ConnectionAdapters::ConnectionPool){|pool| pools << pool}
+
+    pools.each do |pool|
+      pool.drain(age.seconds)
+    end
+  end
+
+  def self.sidekiq_redis_config
+    { url: $redis.url, namespace: 'sidekiq' }
+  end
+
+  def self.static_doc_topic_ids
+    [SiteSetting.tos_topic_id, SiteSetting.guidelines_topic_id, SiteSetting.privacy_topic_id]
   end
 
 end

@@ -2,23 +2,36 @@ require 'spec_helper'
 
 describe BadgesController do
   let!(:badge) { Fabricate(:badge) }
+  let(:user) { Fabricate(:user) }
+
+  before do
+    SiteSetting.enable_badges = true
+  end
 
   context 'index' do
     it 'should return a list of all badges' do
-      xhr :get, :index
+      get :index, format: :json
 
-      response.status.should == 200
+      expect(response.status).to eq(200)
       parsed = JSON.parse(response.body)
-      parsed["badges"].length.should == 1
+      expect(parsed["badges"].length).to eq(Badge.count)
     end
   end
 
   context 'show' do
     it "should return a badge" do
-      xhr :get, :show, id: badge.id
-      response.status.should == 200
+      get :show, id: badge.id, format: :json
+      expect(response.status).to eq(200)
       parsed = JSON.parse(response.body)
-      parsed["badge"].should be_present
+      expect(parsed["badge"]).to be_present
+    end
+
+    it "should mark the notification as viewed" do
+      log_in_user(user)
+      user_badge = BadgeGranter.grant(badge, user)
+      expect(user_badge.notification.read).to eq(false)
+      get :show, id: badge.id, format: :json
+      expect(user_badge.notification.reload.read).to eq(true)
     end
   end
 end

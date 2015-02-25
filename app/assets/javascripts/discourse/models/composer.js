@@ -1,12 +1,3 @@
-/**
-  A data model for representing the composer's current state
-
-  @class Composer
-  @extends Discourse.Model
-  @namespace Discourse
-  @module Discourse
-**/
-
 var CLOSED = 'closed',
     SAVING = 'saving',
     OPEN = 'open',
@@ -17,7 +8,23 @@ var CLOSED = 'closed',
     PRIVATE_MESSAGE = 'privateMessage',
     REPLY = 'reply',
     EDIT = 'edit',
-    REPLY_AS_NEW_TOPIC_KEY = "reply_as_new_topic";
+    REPLY_AS_NEW_TOPIC_KEY = "reply_as_new_topic",
+
+    // When creating, these fields are moved into the post model from the composer model
+    _create_serializer = {
+      raw: 'reply',
+      title: 'title',
+      category: 'categoryId',
+      topic_id: 'topic.id',
+      is_warning: 'isWarning',
+      archetype: 'archetypeId',
+      target_usernames: 'targetUsernames'
+    },
+
+    _edit_topic_serializer = {
+      title: 'topic.title',
+      categoryId: 'topic.category.id'
+    };
 
 Discourse.Composer = Discourse.Model.extend({
 
@@ -74,10 +81,12 @@ Discourse.Composer = Discourse.Model.extend({
         username: this.get('post.username')
       });
 
-      var replyUsername = post.get('reply_to_user.username');
-      var replyAvatarTemplate = post.get('reply_to_user.avatar_template');
-      if (replyUsername && replyAvatarTemplate && this.get('action') === EDIT) {
-        postDescription += " " + I18n.t("post.in_reply_to") + " " + Discourse.Utilities.tinyAvatar(replyAvatarTemplate) + " " + replyUsername;
+      if (!Discourse.Mobile.mobileView) {
+        var replyUsername = post.get('reply_to_user.username');
+        var replyAvatarTemplate = post.get('reply_to_user.avatar_template');
+        if (replyUsername && replyAvatarTemplate && this.get('action') === EDIT) {
+          postDescription += " " + I18n.t("post.in_reply_to") + " " + Discourse.Utilities.tinyAvatar(replyAvatarTemplate) + " " + replyUsername;
+        }
       }
     }
 
@@ -98,33 +107,29 @@ Discourse.Composer = Discourse.Model.extend({
 
   hidePreview: Em.computed.not('showPreview'),
 
-  // Whether to disable the post button
+  // whether to disable the post button
   cantSubmitPost: function() {
-
-    // Can't submit while loading
+    // can't submit while loading
     if (this.get('loading')) return true;
 
-    // Title is required when:
-    //    - creating a new topic
-    //    - editing the 1st post
-    //    - creating a private message
-
+    // title is required when
+    //  - creating a new topic/private message
+    //  - editing the 1st post
     if (this.get('canEditTitle') && !this.get('titleLengthValid')) return true;
-
-    // Need at least one user when sending a private message
-    if ( this.get('creatingPrivateMessage') &&
-         this.get('targetUsernames') &&
-        (this.get('targetUsernames').trim() + ',').indexOf(',') === 0) {
-      return true;
-    }
 
     // reply is always required
     if (this.get('missingReplyCharacters') > 0) return true;
 
-    return this.get('canCategorize') &&
-        !Discourse.SiteSettings.allow_uncategorized_topics &&
-        !this.get('categoryId') &&
-        !Discourse.User.currentProp('staff');
+    if (this.get("privateMessage")) {
+      // need at least one user when sending a PM
+      return this.get('targetUsernames') && (this.get('targetUsernames').trim() + ',').indexOf(',') === 0;
+    } else {
+      // has a category? (when needed)
+      return this.get('canCategorize') &&
+            !Discourse.SiteSettings.allow_uncategorized_topics &&
+            !this.get('categoryId') &&
+            !Discourse.User.currentProp('staff');
+    }
   }.property('loading', 'canEditTitle', 'titleLength', 'targetUsernames', 'replyLength', 'categoryId', 'missingReplyCharacters'),
 
   /**
@@ -133,9 +138,20 @@ Discourse.Composer = Discourse.Model.extend({
     @property titleLengthValid
   **/
   titleLengthValid: function() {
+    if (Discourse.User.currentProp('admin') && this.get('post.static_doc') && this.get('titleLength') > 0) return true;
     if (this.get('titleLength') < this.get('minimumTitleLength')) return false;
     return (this.get('titleLength') <= Discourse.SiteSettings.max_topic_title_length);
-  }.property('minimumTitleLength', 'titleLength'),
+  }.property('minimumTitleLength', 'titleLength', 'post.static_doc'),
+
+  // The icon for the save button
+  saveIcon: function () {
+    switch (this.get('action')) {
+      case EDIT: return '<i class="fa fa-pencil"></i>';
+      case REPLY: return '<i class="fa fa-reply"></i>';
+      case CREATE_TOPIC: return '<i class="fa fa-plus"></i>';
+      case PRIVATE_MESSAGE: return '<i class="fa fa-envelope"></i>';
+    }
+  }.property('action'),
 
   // The text for the save button
   saveText: function() {
@@ -264,26 +280,52 @@ Discourse.Composer = Discourse.Model.extend({
     @method appendText
     @param {String} text the text to append
   **/
-  appendText: function(text) {
-    this.set('reply', (this.get('reply') || '') + text);
+  appendText: function(text,position,opts) {
+    var reply = (this.get('reply') || '');
+    position = typeof(position) === "number" ? position : reply.length;
+
+    var before = reply.slice(0, position) || '';
+    var after = reply.slice(position) || '';
+
+    var stripped, i;
+
+    if(opts && opts.block){
+      if(before.trim() !== ""){
+        stripped = before.replace(/\r/g, "");
+        for(i=0; i<2; i++){
+          if(stripped[stripped.length - 1 - i] !== "\n"){
+            before += "\n";
+            position++;
+          }
+        }
+      }
+      if(after.trim() !== ""){
+        stripped = after.replace(/\r/g, "");
+        for(i=0; i<2; i++){
+          if(stripped[i] !== "\n"){
+            after = "\n" + after;
+          }
+        }
+      }
+    }
+
+    if(opts && opts.space){
+      if(before.length > 0 && !before[before.length-1].match(/\s/)){
+        before = before + " ";
+      }
+      if(after.length > 0 && !after[0].match(/\s/)){
+        after = " " + after;
+      }
+    }
+
+    this.set('reply', before + text + after);
+
+    return before.length + text.length;
   },
 
   togglePreview: function() {
     this.toggleProperty('showPreview');
     Discourse.KeyValueStore.set({ key: 'composer.showPreview', value: this.get('showPreview') });
-  },
-
-  importQuote: function() {
-    // If there is no current post, use the post id from the stream
-    var postId = this.get('post.id') || this.get('topic.postStream.firstPostId');
-    if (postId) {
-      this.set('loading', true);
-      var composer = this;
-      return Discourse.Post.load(postId).then(function(post) {
-        composer.appendText(Discourse.Quote.build(post, post.get('raw')));
-        composer.set('loading', false);
-      });
-    }
   },
 
   /*
@@ -292,7 +334,7 @@ Discourse.Composer = Discourse.Model.extend({
      opts:
        action   - The action we're performing: edit, reply or createTopic
        post     - The post we're replying to, if present
-       topic   - The topic we're replying to, if present
+       topic    - The topic we're replying to, if present
        quote    - If we're opening a reply from a quote, the quote we're making
   */
   open: function(opts) {
@@ -345,10 +387,11 @@ Discourse.Composer = Discourse.Model.extend({
 
     // If we are editing a post, load it.
     if (opts.action === EDIT && opts.post) {
-      this.setProperties({
-        title: this.get('topic.title'),
-        loading: true
-      });
+
+      var topicProps = this.serialize(_edit_topic_serializer);
+      topicProps.loading = true;
+
+      this.setProperties(topicProps);
 
       Discourse.Post.load(opts.post.get('id')).then(function(result) {
         composer.setProperties({
@@ -394,17 +437,19 @@ Discourse.Composer = Discourse.Model.extend({
   editPost: function(opts) {
     var post = this.get('post'),
         oldCooked = post.get('cooked'),
-        composer = this;
+        self = this,
+        promise;
 
-    // Update the title if we've changed it
-    if (this.get('title') && post.get('post_number') === 1) {
-      var topic = this.get('topic');
-      topic.setProperties({
-        title: this.get('title'),
-        fancy_title: this.get('title'),
-        category_id: parseInt(this.get('categoryId'), 10)
-      });
-      topic.save();
+    // Update the title if we've changed it, otherwise consider it a
+    // successful resolved promise
+    if (this.get('title') &&
+        post.get('post_number') === 1 &&
+        this.get('topic.details.can_edit')) {
+
+      var topicProps = this.getProperties(Object.keys(_edit_topic_serializer));
+      promise = Discourse.Topic.update(this.get('topic'), topicProps);
+    } else {
+      promise = Ember.RSVP.resolve();
     }
 
     post.setProperties({
@@ -415,21 +460,36 @@ Discourse.Composer = Discourse.Model.extend({
     });
     this.set('composeState', CLOSED);
 
-    return Ember.Deferred.promise(function(promise) {
-      post.save(function(result) {
+    return promise.then(function() {
+      return post.save(function(result) {
         post.updateFromPost(result);
-        composer.clearState();
-      }, function(error) {
+        self.clearState();
+      }).catch(function(error) {
         var response = $.parseJSON(error.responseText);
         if (response && response.errors) {
-          promise.reject(response.errors[0]);
+          return(response.errors[0]);
         } else {
-          promise.reject(I18n.t('generic_error'));
+          return(I18n.t('generic_error'));
         }
         post.set('cooked', oldCooked);
-        composer.set('composeState', OPEN);
+        self.set('composeState', OPEN);
       });
     });
+  },
+
+  serialize: function(serializer, dest) {
+    if (!dest) {
+      dest = {};
+    }
+
+    var self = this;
+    Object.keys(serializer).forEach(function(f) {
+      var val = self.get(serializer[f]);
+      if (typeof val !== 'undefined') {
+        Ember.set(dest, f, val);
+      }
+    });
+    return dest;
   },
 
   // Create a new Post
@@ -442,34 +502,43 @@ Discourse.Composer = Discourse.Model.extend({
 
     // Build the post object
     var createdPost = Discourse.Post.create({
-      raw: this.get('reply'),
-      title: this.get('title'),
-      category: this.get('categoryId'),
-      topic_id: this.get('topic.id'),
-      reply_to_post_number: post ? post.get('post_number') : null,
       imageSizes: opts.imageSizes,
       cooked: this.getCookedHtml(),
       reply_count: 0,
+      name: currentUser.get('name'),
       display_username: currentUser.get('name'),
       username: currentUser.get('username'),
       user_id: currentUser.get('id'),
-      avatar_template: currentUser.get('avatar_template'),
-      metaData: this.get('metaData'),
-      archetype: this.get('archetypeId'),
+      user_title: currentUser.get('title'),
+      uploaded_avatar_id: currentUser.get('uploaded_avatar_id'),
+      user_custom_fields: currentUser.get('custom_fields'),
       post_type: Discourse.Site.currentProp('post_types.regular'),
-      target_usernames: this.get('targetUsernames'),
-      actions_summary: Em.A(),
+      actions_summary: [],
       moderator: currentUser.get('moderator'),
+      admin: currentUser.get('admin'),
       yours: true,
       newPost: true,
-      auto_close_time: Discourse.Utilities.timestampFromAutocloseString(this.get('auto_close_time'))
     });
+
+    this.serialize(_create_serializer, createdPost);
+
+    if (post) {
+      createdPost.setProperties({
+        reply_to_post_number: post.get('post_number'),
+        reply_to_user: {
+          username: post.get('username'),
+          uploaded_avatar_id: post.get('uploaded_avatar_id')
+        }
+      });
+    }
+
 
     // If we're in a topic, we can append the post instantly.
     if (postStream) {
       // If it's in reply to another post, increase the reply count
       if (post) {
         post.set('reply_count', (post.get('reply_count') || 0) + 1);
+        post.set('replies', []);
       }
       if (!postStream.stagePost(createdPost, currentUser)) {
 
@@ -480,7 +549,7 @@ Discourse.Composer = Discourse.Model.extend({
     }
 
     var composer = this;
-    return Ember.Deferred.promise(function(promise) {
+    return new Ember.RSVP.Promise(function(resolve, reject) {
 
       composer.set('composeState', SAVING);
       createdPost.save(function(result) {
@@ -492,12 +561,18 @@ Discourse.Composer = Discourse.Model.extend({
           // It's no longer a new post
           createdPost.set('newPost', false);
           topic.set('draft_sequence', result.draft_sequence);
+          topic.set('details.auto_close_at', result.topic_auto_close_at);
           postStream.commitPost(createdPost);
           addedToStream = true;
         } else {
           // We created a new topic, let's show it.
           composer.set('composeState', CLOSED);
           saving = false;
+
+          // Update topic_count for the category
+          var category = Discourse.Site.currentProp('categories').find(function(x) { return x.get('id') === (parseInt(createdPost.get('category'),10) || 1); });
+          if (category) category.incrementProperty('topic_count');
+          Discourse.notifyPropertyChange('globalNotice');
         }
 
         composer.clearState();
@@ -509,7 +584,7 @@ Discourse.Composer = Discourse.Model.extend({
           composer.set('composeState', SAVING);
         }
 
-        return promise.resolve({ post: result });
+        return resolve({ post: result });
       }, function(error) {
         // If an error occurs
         if (postStream) {
@@ -530,7 +605,7 @@ Discourse.Composer = Discourse.Model.extend({
         catch(ex) {
           parsedError = "Unknown error saving post, try again. Error: " + error.status + " " + error.statusText;
         }
-        promise.reject(parsedError);
+        reject(parsedError);
       });
     });
   },
@@ -617,6 +692,20 @@ Discourse.Composer.reopenClass({
       });
     }
     return composer;
+  },
+
+  serializeToTopic: function(fieldName, property) {
+    if (!property) { property = fieldName; }
+    _edit_topic_serializer[fieldName] = property;
+  },
+
+  serializeOnCreate: function(fieldName, property) {
+    if (!property) { property = fieldName; }
+    _create_serializer[fieldName] = property;
+  },
+
+  serializedFieldsForCreate: function() {
+    return Object.keys(_create_serializer);
   },
 
   // The status the compose view can have

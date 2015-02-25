@@ -3,7 +3,7 @@ require "avatar_upload_service"
 
 describe AvatarUploadService do
 
-  let(:logo) { File.new("#{Rails.root}/spec/fixtures/images/logo.png") }
+  let(:logo) { file_from_fixtures("logo.png") }
 
   let(:file) do
     ActionDispatch::Http::UploadedFile.new({ filename: 'logo.png', tempfile: logo })
@@ -16,19 +16,19 @@ describe AvatarUploadService do
       let(:avatar_file) { AvatarUploadService.new(file, :image) }
 
       it "should have a filesize" do
-        avatar_file.filesize.should == 2290
+        expect(avatar_file.filesize).to be > 0
       end
 
       it "should have a filename" do
-        avatar_file.filename.should == "logo.png"
+        expect(avatar_file.filename).to eq("logo.png")
       end
 
       it "should have a file" do
-        avatar_file.file.should == file.tempfile
+        expect(avatar_file.file).to eq(file.tempfile)
       end
 
       it "should have a source as 'image'" do
-        avatar_file.source.should == :image
+        expect(avatar_file.source).to eq(:image)
       end
     end
 
@@ -38,19 +38,19 @@ describe AvatarUploadService do
       before { FileHelper.stubs(:download).returns(logo) }
 
       it "should have a filesize" do
-        avatar_file.filesize.should == 2290
+        expect(avatar_file.filesize).to be > 0
       end
 
       it "should have a filename" do
-        avatar_file.filename.should == "logo.png"
+        expect(avatar_file.filename).to eq("logo.png")
       end
 
       it "should have a file" do
-        avatar_file.file.should == logo
+        expect(avatar_file.file).to eq(logo)
       end
 
       it "should have a source as 'url'" do
-        avatar_file.source.should == :url
+        expect(avatar_file.source).to eq(:url)
       end
     end
   end

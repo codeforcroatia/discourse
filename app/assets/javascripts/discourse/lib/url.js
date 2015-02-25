@@ -1,14 +1,38 @@
-/**
-  URL related functions.
+/*global LockOn:true*/
+var jumpScheduled = false,
+    rewrites = [];
 
-  @class URL
-  @namespace Discourse
-  @module Discourse
-**/
-Discourse.URL = Em.Object.createWithMixins({
+Discourse.URL = Ember.Object.createWithMixins({
 
   // Used for matching a topic
   TOPIC_REGEXP: /\/t\/([^\/]+)\/(\d+)\/?(\d+)?/,
+
+  isJumpScheduled: function() {
+    return jumpScheduled;
+  },
+
+  /**
+    Jumps to a particular post in the stream
+  **/
+  jumpToPost: function(postNumber) {
+    var holderId = '#post-cloak-' + postNumber;
+
+    Em.run.schedule('afterRender', function() {
+      if (postNumber === 1) {
+        $(window).scrollTop(0);
+        return;
+      }
+
+      new LockOn(holderId, {offsetCalculator: function() {
+        var $header = $('header'),
+            $title = $('#topic-title'),
+            windowHeight = $(window).height() - $title.height(),
+            expectedOffset = $title.height() - $header.find('.contents').height() + (windowHeight / 5);
+
+        return $header.outerHeight(true) + ((expectedOffset < 0) ? 0 : expectedOffset);
+      }}).lock();
+    });
+  },
 
   /**
     Browser aware replaceState. Will only be invoked if the browser supports it.
@@ -29,15 +53,27 @@ Discourse.URL = Em.Object.createWithMixins({
         Em.run.next(function() {
           var location = Discourse.URL.get('router.location');
           if (location && location.replaceURL) {
-
-            if (Ember.FEATURES.isEnabled("query-params-new")) {
-              var search = Discourse.__container__.lookup('router:main').get('location.location.search') || '';
-              path += search;
-            }
             location.replaceURL(path);
           }
         });
     }
+  },
+
+  // Scroll to the same page, different anchor
+  scrollToId: function(id) {
+    if (Em.isEmpty(id)) { return; }
+
+    jumpScheduled = true;
+    Em.run.schedule('afterRender', function() {
+      var $elem = $(id);
+      if ($elem.length === 0) {
+        $elem = $("[name=" + id.replace('#', ''));
+      }
+      if ($elem.length > 0) {
+        $('html,body').scrollTop($elem.offset().top - $('header').height() - 15);
+        jumpScheduled = false;
+      }
+    });
   },
 
   /**
@@ -52,8 +88,22 @@ Discourse.URL = Em.Object.createWithMixins({
   **/
   routeTo: function(path) {
 
-    if(Discourse.get("requiresRefresh")){
+    if (Em.isEmpty(path)) { return; }
+
+    if (Discourse.get('requiresRefresh')) {
       document.location.href = path;
+      return;
+    }
+
+    // Protocol relative URLs
+    if (path.indexOf('//') === 0) {
+      document.location = path;
+      return;
+    }
+
+    // Scroll to the same page, different anchor
+    if (path.indexOf('#') === 0) {
+      this.scrollToId(path);
       return;
     }
 
@@ -67,26 +117,41 @@ Discourse.URL = Em.Object.createWithMixins({
       path = path.replace(rootURL, '');
     }
 
+    // Rewrite /my/* urls
+    if (path.indexOf('/my/') === 0) {
+      var currentUser = Discourse.User.current();
+      if (currentUser) {
+        path = path.replace('/my/', '/users/' + currentUser.get('username_lower') + "/");
+      } else {
+        document.location.href = "/404";
+        return;
+      }
+    }
+
+    rewrites.forEach(function(rw) {
+      path = path.replace(rw.regexp, rw.replacement);
+    });
+
+    if (this.navigatedToPost(oldPath, path)) { return; }
     // Schedule a DOM cleanup event
     Em.run.scheduleOnce('afterRender', Discourse.Route, 'cleanDOM');
 
     // TODO: Extract into rules we can inject into the URL handler
     if (this.navigatedToHome(oldPath, path)) { return; }
-    if (this.navigatedToPost(oldPath, path)) { return; }
 
-    if (path.match(/^\/?users\/[^\/]+$/)) {
-      path += "/activity";
+    if (oldPath === path) {
+      // If navigating to the same path send an app event. Views can watch it
+      // and tell their controllers to refresh
+      this.appEvents.trigger('url:refresh');
     }
 
     return this.handleURL(path);
   },
 
-  /**
-    Redirect to a URL.
-    This has been extracted so it can be tested.
+  rewrite: function(regexp, replacement) {
+    rewrites.push({ regexp: regexp, replacement: replacement });
+  },
 
-    @method redirectTo
-  **/
   redirectTo: function(url) {
     window.location = Discourse.getURL(url);
   },
@@ -99,6 +164,7 @@ Discourse.URL = Em.Object.createWithMixins({
   **/
   isInternal: function(url) {
     if (url && url.length) {
+      if (url.indexOf('#') === 0) { return true; }
       if (url.indexOf('/') === 0) { return true; }
       if (url.indexOf(this.origin()) === 0) { return true; }
       if (url.replace(/^http/, 'https').indexOf(this.origin()) === 0) { return true; }
@@ -130,7 +196,8 @@ Discourse.URL = Em.Object.createWithMixins({
       if (oldTopicId === newTopicId) {
         Discourse.URL.replaceState(path);
 
-        var topicController = Discourse.__container__.lookup('controller:topic'),
+        var container = Discourse.__container__,
+            topicController = container.lookup('controller:topic'),
             opts = {},
             postStream = topicController.get('postStream');
 
@@ -138,15 +205,20 @@ Discourse.URL = Em.Object.createWithMixins({
         if (path.match(/last$/)) { opts.nearPost = topicController.get('highest_post_number'); }
         var closest = opts.nearPost || 1;
 
+        var self = this;
         postStream.refresh(opts).then(function() {
           topicController.setProperties({
             currentPost: closest,
-            progressPosition: closest,
-            highlightOnInsert: closest,
             enteredAt: new Date().getTime().toString()
           });
+          var closestPost = postStream.closestPostForPostNumber(closest),
+              progress = postStream.progressIndexOfPost(closestPost),
+              progressController = container.lookup('controller:topic-progress');
+
+          progressController.set('progressPosition', progress);
+          self.appEvents.trigger('post:highlight', closest);
         }).then(function() {
-          Discourse.TopicView.jumpToPost(closest);
+          Discourse.URL.jumpToPost(closest);
         });
 
         // Abort routing, we have replaced our state.
@@ -166,15 +238,13 @@ Discourse.URL = Em.Object.createWithMixins({
     @param {String} path the path we're navigating to
   **/
   navigatedToHome: function(oldPath, path) {
-    var homepage = Discourse.User.current() ? Discourse.User.currentProp('homepage') : Discourse.Utilities.defaultHomepage();
+    var homepage = Discourse.Utilities.defaultHomepage();
 
-    if (path === "/" && (oldPath === "/" || oldPath === "/" + homepage)) {
-      // refresh the list
-      switch (homepage) {
-        case "top" :       { this.controllerFor('discoveryTop').send('refresh'); break; }
-        case "categories": { this.controllerFor('discoveryCategories').send('refresh'); break; }
-        default:           { this.controllerFor('discoveryTopics').send('refresh'); break; }
-      }
+    if (window.history &&
+        window.history.pushState &&
+        (path === "/" || path === "/" + homepage) &&
+        (oldPath === "/" || oldPath === "/" + homepage)) {
+      this.appEvents.trigger('url:refresh');
       return true;
     }
 
@@ -230,7 +300,30 @@ Discourse.URL = Em.Object.createWithMixins({
   handleURL: function(path) {
     var router = this.get('router');
     router.router.updateURL(path);
-    return router.handleURL(path);
+
+    var split = path.split('#'),
+        elementId;
+
+    if (split.length === 2) {
+      path = split[0];
+      elementId = split[1];
+    }
+
+    var transition = router.handleURL(path);
+    transition._discourse_intercepted = true;
+    transition.promise.then(function() {
+      if (elementId) {
+
+        jumpScheduled = true;
+        Em.run.next('afterRender', function() {
+          var offset = $('#' + elementId).offset();
+          if (offset && offset.top) {
+            $('html, body').scrollTop(offset.top - $('header').height() - 10);
+            jumpScheduled = false;
+          }
+        });
+      }
+    });
   }
 
 });

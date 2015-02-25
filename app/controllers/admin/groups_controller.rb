@@ -1,37 +1,50 @@
 class Admin::GroupsController < Admin::AdminController
+
   def index
-    groups = Group.order(:name).to_a
+    groups = Group.order(:name)
+
+    if search = params[:search]
+      search = search.to_s
+      groups = groups.where("name ILIKE ?", "%#{search}%")
+    end
+
+    if params[:ignore_automatic].to_s == "true"
+      groups = groups.where(automatic: false)
+    end
+
     render_serialized(groups, BasicGroupSerializer)
   end
 
-  def refresh_automatic_groups
-    Group.refresh_automatic_groups!
-    render json: success_json
+  def show
+    render nothing: true
   end
 
-  def update
-    group = Group.find(params[:id].to_i)
+  def create
+    group = Group.new
 
-    if group.automatic
-      # we can only change the alias level on automatic groups
-      group.alias_level = params[:group][:alias_level]
-    else
-      group.usernames = params[:group][:usernames]
-      group.alias_level = params[:group][:alias_level]
-      group.name = params[:group][:name] if params[:group][:name]
-    end
+    group.name = (params[:name] || '').strip
+    group.alias_level = params[:alias_level].to_i if params[:alias_level].present?
+    group.visible = params[:visible] == "true"
+    group.automatic_membership_email_domains = params[:automatic_membership_email_domains]
+    group.automatic_membership_retroactive = params[:automatic_membership_retroactive] == "true"
 
     if group.save
-      render json: success_json
+      render_serialized(group, BasicGroupSerializer)
     else
       render_json_error group
     end
   end
 
-  def create
-    group = Group.new
-    group.name = params[:group][:name].strip
-    group.usernames = params[:group][:usernames] if params[:group][:usernames]
+  def update
+    group = Group.find(params[:id])
+
+    # group rename is ignored for automatic groups
+    group.name = params[:name] if params[:name] && !group.automatic
+    group.alias_level = params[:alias_level].to_i if params[:alias_level].present?
+    group.visible = params[:visible] == "true"
+    group.automatic_membership_email_domains = params[:automatic_membership_email_domains]
+    group.automatic_membership_retroactive = params[:automatic_membership_retroactive] == "true"
+
     if group.save
       render_serialized(group, BasicGroupSerializer)
     else
@@ -40,7 +53,8 @@ class Admin::GroupsController < Admin::AdminController
   end
 
   def destroy
-    group = Group.find(params[:id].to_i)
+    group = Group.find(params[:id])
+
     if group.automatic
       can_not_modify_automatic
     else
@@ -49,9 +63,51 @@ class Admin::GroupsController < Admin::AdminController
     end
   end
 
+  def refresh_automatic_groups
+    Group.refresh_automatic_groups!
+    render json: success_json
+  end
+
+  def add_members
+    group = Group.find(params.require(:id))
+    usernames = params.require(:usernames)
+
+    return can_not_modify_automatic if group.automatic
+
+    usernames.split(",").each do |username|
+      if user = User.find_by_username(username)
+        group.add(user)
+      end
+    end
+
+    if group.save
+      render json: success_json
+    else
+      render_json_error(group)
+    end
+  end
+
+  def remove_member
+    group = Group.find(params.require(:id))
+    user_id = params.require(:user_id).to_i
+
+    return can_not_modify_automatic if group.automatic
+
+    user = User.find(user_id)
+    user.primary_group_id = nil if user.primary_group_id == group.id
+
+    group.users.delete(user_id)
+
+    if group.save && user.save
+      render json: success_json
+    else
+      render_json_error(group)
+    end
+  end
+
   protected
 
-  def can_not_modify_automatic
-    render json: {errors: I18n.t('groups.errors.can_not_modify_automatic')}, status: 422
-  end
+    def can_not_modify_automatic
+      render json: {errors: I18n.t('groups.errors.can_not_modify_automatic')}, status: 422
+    end
 end

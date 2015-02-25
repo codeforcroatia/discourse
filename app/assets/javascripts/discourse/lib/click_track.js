@@ -5,6 +5,7 @@
   @namespace Discourse
   @module Discourse
 **/
+
 Discourse.ClickTrack = {
 
   /**
@@ -14,6 +15,7 @@ Discourse.ClickTrack = {
     @param {jQuery.Event} e The click event that occurred
   **/
   trackClick: function(e) {
+    if (Discourse.Utilities.selectedText()!=="") return false;  //cancle click if triggered as part of selection.
     var $link = $(e.currentTarget);
     if ($link.hasClass('lightbox')) return true;
 
@@ -22,6 +24,10 @@ Discourse.ClickTrack = {
         postId = $article.data('post-id'),
         topicId = $('#topic').data('topic-id'),
         userId = $link.data('user-id');
+
+    if (!href || href.trim().length === 0){
+      return;
+    }
 
     if (!userId) userId = $article.data('user-id');
 
@@ -38,15 +44,11 @@ Discourse.ClickTrack = {
     if (!ownLink) {
       var $badge = $('span.badge', $link);
       if ($badge.length === 1) {
-        // don't update counts in category badge
-        if ($link.closest('.badge-category').length === 0) {
-          // nor in oneboxes (except when we force it)
-          if (($link.closest(".onebox-result").length === 0 && $link.closest('.onebox-body').length === 0) || $link.hasClass("track-link")) {
-            var html = $badge.html();
-            if (/^\d+$/.test(html)) {
-              $badge.html(parseInt(html, 10) + 1);
-            }
-          }
+        // don't update counts in category badge nor in oneboxes (except when we force it)
+        if ($link.hasClass("track-link") ||
+            $link.closest('.badge-category,.onebox-result,.onebox-body').length === 0) {
+          var html = $badge.html();
+          if (/^\d+$/.test(html)) { $badge.html(parseInt(html, 10) + 1); }
         }
       }
     }
@@ -75,7 +77,7 @@ Discourse.ClickTrack = {
     e.preventDefault();
 
     // We don't track clicks on quote back buttons
-    if ($link.hasClass('back') || $link.hasClass('quote-other-topic')) return true;
+    if ($link.hasClass('back') || $link.hasClass('quote-other-topic')) { return true; }
 
     // Remove the href, put it as a data attribute
     if (!$link.data('href')) {
@@ -84,6 +86,12 @@ Discourse.ClickTrack = {
       $link.attr('href', null);
       // Don't route to this URL
       $link.data('auto-route', true);
+    }
+
+    // warn the user if they can't download the file
+    if (Discourse.SiteSettings.prevent_anons_from_downloading_files && $link.hasClass("attachment") && !Discourse.User.current()) {
+      bootbox.alert(I18n.t("post.errors.attachment_download_requires_login"));
+      return false;
     }
 
     // If we're on the same site, use the router and track via AJAX
@@ -100,6 +108,13 @@ Discourse.ClickTrack = {
       Discourse.URL.routeTo(href);
       return false;
     }
+
+    // restore href
+    setTimeout(function() {
+      $link.removeClass('no-href');
+      $link.attr('href', $link.data('href'));
+      $link.data('href', null);
+    }, 50);
 
     // Otherwise, use a custom URL with a redirect
     if (Discourse.User.currentProp('external_links_in_new_tab')) {
